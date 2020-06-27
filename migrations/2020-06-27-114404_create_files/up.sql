@@ -1,0 +1,9 @@
+-- Your SQL goes here
+CREATE TABLE files (
+  id INTEGER NOT NULL PRIMARY KEY,
+  name VARCHAR NOT NULL,
+  hash VARCHAR NOT NULL,
+  eposid_id INTEGER NOT NULL,
+  access_count INTEGER NOT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+)

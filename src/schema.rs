@@ -19,7 +19,7 @@ table! {
     files (id) {
         id -> Integer,
         name -> Text,
-        hash -> Text,
+        content_hash -> Text,
         eposid_id -> Integer,
         access_count -> Integer,
         created_at -> Timestamp,

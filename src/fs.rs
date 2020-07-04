@@ -220,9 +220,9 @@ impl ComicFS {
     }
 
     fn find_eposide_by_inode(&self, inode: Inode) -> Option<FileAttr> {
-        use schema::eposids::dsl;
+        use schema::eposides::dsl;
 
-        let res = dsl::eposids
+        let res = dsl::eposides
             .find(i32::try_from(inode.id()).unwrap())
             .first::<Eposide>(&self.conn);
         res.ok().map(|info| directory_attr(Inode::eposide(info.id)))
@@ -247,9 +247,9 @@ impl ComicFS {
     }
 
     fn find_comic_eposide_by_name(&self, id: u64, name: &str) -> Option<FileAttr> {
-        use schema::eposids::dsl;
+        use schema::eposides::dsl;
 
-        let res = dsl::eposids
+        let res = dsl::eposides
             .filter(dsl::comic_id.eq(i32::try_from(id).unwrap()))
             .filter(dsl::name.eq(name))
             .first::<Eposide>(&self.conn);
@@ -389,9 +389,9 @@ impl Filesystem for ComicFS {
                 let kind = ino.kind();
                 match kind {
                     InodeKind::Comic => {
-                        use schema::eposids::dsl;
+                        use schema::eposides::dsl;
                         if offset == 0 {
-                            let eposides = dsl::eposids
+                            let eposides = dsl::eposides
                                 .filter(dsl::comic_id.eq(i32::try_from(ino.id()).unwrap()))
                                 .load::<Eposide>(&self.conn);
                             if let Ok(eposides) = eposides {

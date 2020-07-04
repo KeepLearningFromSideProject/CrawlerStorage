@@ -7,7 +7,7 @@ table! {
 }
 
 table! {
-    eposids (id) {
+    eposides (id) {
         id -> Integer,
         name -> Text,
         comic_id -> Integer,
@@ -28,6 +28,6 @@ table! {
 
 allow_tables_to_appear_in_same_query!(
     comics,
-    eposids,
+    eposides,
     files,
 );

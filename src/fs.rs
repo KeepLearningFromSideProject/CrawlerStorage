@@ -7,12 +7,13 @@ use fuse::{
     FileAttr, FileType, Filesystem, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty,
     ReplyEntry, ReplyStatfs, ReplyWrite, Request,
 };
-use libc::{EEXIST, EIO, ENOENT, ENOSYS, EPERM};
+use libc::{EEXIST, EIO, EISDIR, ENOENT, ENOSYS, EPERM};
 use std::{
     convert::{TryFrom, TryInto},
+    env,
     ffi::OsStr,
     fmt, fs,
-    os::unix::fs::MetadataExt,
+    os::unix::fs::{FileExt, MetadataExt},
     path::{Path, PathBuf},
     time::{Duration, SystemTime},
 };
@@ -211,30 +212,18 @@ impl ComicFS {
     }
 
     fn find_comic_by_inode(&self, inode: Inode) -> Option<FileAttr> {
-        use schema::comics::dsl;
-
-        let res = dsl::comics
-            .find(i32::try_from(inode.id()).unwrap())
-            .first::<Comic>(&self.conn);
-        res.ok().map(|info| directory_attr(Inode::comic(info.id)))
+        Comic::find(i32::try_from(inode.id()).unwrap(), &self.conn)
+            .map(|info| directory_attr(Inode::comic(info.id)))
     }
 
     fn find_eposide_by_inode(&self, inode: Inode) -> Option<FileAttr> {
-        use schema::eposides::dsl;
-
-        let res = dsl::eposides
-            .find(i32::try_from(inode.id()).unwrap())
-            .first::<Eposide>(&self.conn);
-        res.ok().map(|info| directory_attr(Inode::eposide(info.id)))
+        let res = Eposide::find(i32::try_from(inode.id()).unwrap(), &self.conn);
+        res.map(|info| directory_attr(Inode::eposide(info.id)))
     }
 
     fn find_file_by_inode(&self, inode: Inode) -> Option<FileAttr> {
-        use schema::files::dsl;
-
-        let res = dsl::files
-            .find(i32::try_from(inode.id()).unwrap())
-            .first::<File>(&self.conn);
-        res.ok().map(|info| file_attr(Inode::file(info.id)))
+        let res = File::find(i32::try_from(inode.id()).unwrap(), &self.conn);
+        res.map(|info| file_attr(Inode::file(info.id)))
     }
 
     fn find_comic_by_name(&self, name: &str) -> Option<FileAttr> {
@@ -257,13 +246,14 @@ impl ComicFS {
     }
 
     fn find_eposide_file_by_name(&self, id: u64, name: &str) -> Option<FileAttr> {
-        use schema::files::dsl;
+        File::find_by_eposide_and_name(i32::try_from(id).unwrap(), name, &self.conn)
+            .map(|info| file_attr(Inode::file(info.id)))
+    }
 
-        let res = dsl::files
-            .filter(dsl::eposid_id.eq(i32::try_from(id).unwrap()))
-            .filter(dsl::name.eq(name))
-            .first::<File>(&self.conn);
-        res.ok().map(|info| file_attr(Inode::file(info.id)))
+    fn inode_to_storage(&self, ino: Inode) -> Option<PathBuf> {
+        let info = File::find(i32::try_from(ino.id()).unwrap(), &self.conn)?;
+        let path = generate_storage_path(&info.content_hash);
+        Some(path)
     }
 }
 
@@ -305,7 +295,14 @@ impl Filesystem for ComicFS {
                     }
                     InodeKind::Eposide => {
                         let name = name.to_str().unwrap();
-                        self.find_eposide_file_by_name(ino.id(), name)
+                        let info =
+                            File::find_by_eposide_and_name(i32::try_from(ino.id()).unwrap(), name, &self.conn);
+                        info.and_then(|info| {
+                            let id = info.id;
+                            let path = generate_storage_path(&info.content_hash);
+                            let meta = fs::metadata(&path).ok()?;
+                            Some(convert_meta_to_attr(Inode::file(id).0, meta))
+                        })
                     }
                     InodeKind::Special | InodeKind::File => unreachable!(),
                     _ => todo!(),
@@ -334,7 +331,15 @@ impl Filesystem for ComicFS {
                 let attr = match kind {
                     InodeKind::Comic => self.find_comic_by_inode(ino),
                     InodeKind::Eposide => self.find_eposide_by_inode(ino),
-                    InodeKind::File => self.find_file_by_inode(ino),
+                    InodeKind::File => {
+                        let info = File::find(i32::try_from(ino.id()).unwrap(), &self.conn);
+                        info.and_then(|info| {
+                            let id = info.id;
+                            let path = generate_storage_path(&info.content_hash);
+                            let meta = fs::metadata(&path).ok()?;
+                            Some(convert_meta_to_attr(Inode::file(id).0, meta))
+                        })
+                    }
                     _ => todo!(),
                 };
                 match attr {
@@ -443,7 +448,38 @@ impl Filesystem for ComicFS {
         size: u32,
         reply: ReplyData,
     ) {
-        reply.error(ENOSYS);
+        let ino = Inode(ino);
+        let kind = ino.kind();
+        if kind != InodeKind::File {
+            reply.error(EISDIR);
+            return;
+        }
+        let path = self.inode_to_storage(ino);
+        let path = match path {
+            Some(path) => path,
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+        let file = fs::File::open(&path);
+        match file {
+            Ok(file) => {
+                let mut buf = vec![0; usize::try_from(size).unwrap()];
+                match file.read_at(&mut buf, u64::try_from(offset).unwrap()) {
+                    Ok(size) => {
+                        reply.data(&buf[0..size]);
+                    }
+                    Err(_) => {
+                        reply.error(EIO);
+                    }
+                }
+            }
+            Err(_) => {
+                // TODO: decide to return error or empty content
+                reply.data(&[]);
+            }
+        }
     }
 
     fn mkdir(
@@ -527,6 +563,14 @@ fn convert_meta_to_attr(ino: u64, meta: fs::Metadata) -> fuse::FileAttr {
         rdev: 0,
         flags: 0,
     }
+}
+
+fn generate_storage_path(content_hash: &str) -> PathBuf {
+    let mut path = env::current_dir().unwrap();
+    path.push("storage");
+    path.push(&content_hash[0..2]);
+    path.push(&content_hash);
+    path
 }
 
 fn convert_file_type(kind: fs::FileType) -> fuse::FileType {

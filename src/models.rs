@@ -1,4 +1,4 @@
-use crate::schema::{self, files};
+use crate::schema::{self, comics, eposides, files};
 use chrono::NaiveDateTime;
 use diesel::prelude::*;
 use serde::Deserialize;
@@ -87,6 +87,19 @@ impl File {
             .first::<File>(conn)
             .ok()
     }
+}
+
+#[derive(Deserialize, Insertable)]
+#[table_name = "comics"]
+pub struct NewComic<'a> {
+    pub name: &'a str,
+}
+
+#[derive(Deserialize, Insertable)]
+#[table_name = "eposides"]
+pub struct NewEposide<'a> {
+    pub name: &'a str,
+    pub comic_id: i32,
 }
 
 #[derive(Deserialize, Insertable)]

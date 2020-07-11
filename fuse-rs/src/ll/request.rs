@@ -256,6 +256,7 @@ impl<'a> fmt::Display for Operation<'a> {
 }
 
 impl<'a> Operation<'a> {
+    #[allow(clippy::cast_ptr_alignment)]
     fn parse(opcode: &fuse_opcode, data: &mut ArgumentIterator<'a>) -> Option<Self> {
         unsafe {
             Some(match opcode {

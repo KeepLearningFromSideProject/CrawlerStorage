@@ -1,13 +1,13 @@
 use crate::{
-    models::{Comic, Eposide, File},
+    models::{self, Comic, Eposide, File},
     schema,
 };
 use diesel::prelude::*;
 use fuse::{
-    FileAttr, FileType, Filesystem, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty,
-    ReplyEntry, ReplyStatfs, ReplyWrite, Request,
+    FileAttr, FileType, Filesystem, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEntry,
+    ReplyWrite, Request,
 };
-use libc::{EEXIST, EIO, EISDIR, ENOENT, ENOSYS, EPERM};
+use libc::{EEXIST, EIO, EISDIR, ENOENT, ENOSYS, ENOTDIR, EPERM};
 use std::{
     convert::{TryFrom, TryInto},
     env,
@@ -29,6 +29,12 @@ enum InodeKind {
 
 #[derive(Copy, Clone, Hash, PartialEq, Eq)]
 pub struct Inode(u64);
+
+impl From<u64> for Inode {
+    fn from(ino: u64) -> Self {
+        Inode(ino)
+    }
+}
 
 impl fmt::Debug for Inode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -187,26 +193,11 @@ fn directory_attr(inode: Inode) -> FileAttr {
     }
 }
 
-fn file_attr(inode: Inode) -> FileAttr {
-    FileAttr {
-        ino: inode.0,
-        size: 0,
-        blocks: 0,
-        atime: SystemTime::UNIX_EPOCH,
-        mtime: SystemTime::UNIX_EPOCH,
-        ctime: SystemTime::UNIX_EPOCH,
-        crtime: SystemTime::UNIX_EPOCH,
-        kind: FileType::RegularFile,
-        perm: 0o644,
-        nlink: 1,
-        uid: 1000,
-        gid: 1000,
-        rdev: 0,
-        flags: 0,
-    }
-}
-
 impl ComicFS {
+    const ROOT_ID: u64 = 1;
+    const COMIC_ID: u64 = 2;
+    const TAGS_ID: u64 = 3;
+
     fn new(conn: SqliteConnection) -> Self {
         Self { conn }
     }
@@ -221,28 +212,13 @@ impl ComicFS {
         res.map(|info| directory_attr(Inode::eposide(info.id)))
     }
 
-    fn find_file_by_inode(&self, inode: Inode) -> Option<FileAttr> {
-        let res = File::find(i32::try_from(inode.id()).unwrap(), &self.conn);
-        res.map(|info| file_attr(Inode::file(info.id)))
-    }
-
     fn find_comic_by_name(&self, name: &str) -> Option<FileAttr> {
-        use schema::comics::dsl;
-
-        let res = dsl::comics
-            .filter(dsl::name.eq(name))
-            .first::<Comic>(&self.conn);
-        res.ok().map(|info| directory_attr(Inode::comic(info.id)))
+        Comic::find_by_name(name, &self.conn).map(|info| directory_attr(Inode::comic(info.id)))
     }
 
     fn find_comic_eposide_by_name(&self, id: u64, name: &str) -> Option<FileAttr> {
-        use schema::eposides::dsl;
-
-        let res = dsl::eposides
-            .filter(dsl::comic_id.eq(i32::try_from(id).unwrap()))
-            .filter(dsl::name.eq(name))
-            .first::<Eposide>(&self.conn);
-        res.ok().map(|info| directory_attr(Inode::eposide(info.id)))
+        Eposide::find_by_comic_and_name(i32::try_from(id).unwrap(), name, &self.conn)
+            .map(|info| directory_attr(Inode::eposide(info.id)))
     }
 
     fn find_eposide_file_by_name(&self, id: u64, name: &str) -> Option<FileAttr> {
@@ -260,7 +236,7 @@ impl ComicFS {
 impl Filesystem for ComicFS {
     fn lookup(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEntry) {
         match parent {
-            1 => {
+            Self::ROOT_ID => {
                 if name == "comics" {
                     reply.entry(&ONE_SEC, &SPECIAL_DIR_ATTRS[0], 0);
                 } else if name == "tags" {
@@ -269,8 +245,7 @@ impl Filesystem for ComicFS {
                     reply.error(ENOENT);
                 }
             }
-            // comics
-            2 => {
+            Self::COMIC_ID => {
                 let name = name.to_str().unwrap();
                 let attr = self.find_comic_by_name(name);
                 match attr {
@@ -282,11 +257,11 @@ impl Filesystem for ComicFS {
                     }
                 }
             }
-            3 => {
+            Self::TAGS_ID => {
                 reply.error(ENOENT);
             }
             ino => {
-                let ino = dbg!(Inode(ino));
+                let ino = Inode::from(ino);
                 let kind = ino.kind();
                 let attr = match kind {
                     InodeKind::Comic => {
@@ -295,8 +270,11 @@ impl Filesystem for ComicFS {
                     }
                     InodeKind::Eposide => {
                         let name = name.to_str().unwrap();
-                        let info =
-                            File::find_by_eposide_and_name(i32::try_from(ino.id()).unwrap(), name, &self.conn);
+                        let info = File::find_by_eposide_and_name(
+                            i32::try_from(ino.id()).unwrap(),
+                            name,
+                            &self.conn,
+                        );
                         info.and_then(|info| {
                             let id = info.id;
                             let path = generate_storage_path(&info.content_hash);
@@ -322,11 +300,11 @@ impl Filesystem for ComicFS {
 
     fn getattr(&mut self, _req: &Request<'_>, ino: u64, reply: ReplyAttr) {
         match ino {
-            1 => reply.attr(&ONE_SEC, &ROOT_DIR_ATTR),
-            2 => reply.attr(&ONE_SEC, &SPECIAL_DIR_ATTRS[0]),
-            3 => reply.attr(&ONE_SEC, &SPECIAL_DIR_ATTRS[1]),
+            Self::ROOT_ID => reply.attr(&ONE_SEC, &ROOT_DIR_ATTR),
+            Self::COMIC_ID => reply.attr(&ONE_SEC, &SPECIAL_DIR_ATTRS[0]),
+            Self::TAGS_ID => reply.attr(&ONE_SEC, &SPECIAL_DIR_ATTRS[1]),
             ino => {
-                let ino = Inode(ino);
+                let ino = Inode::from(ino);
                 let kind = ino.kind();
                 let attr = match kind {
                     InodeKind::Comic => self.find_comic_by_inode(ino),
@@ -363,7 +341,7 @@ impl Filesystem for ComicFS {
         mut reply: ReplyDirectory,
     ) {
         match ino {
-            1 => {
+            Self::ROOT_ID => {
                 if offset == 0 {
                     reply.add(1, 1, FileType::Directory, ".");
                     reply.add(1, 2, FileType::Directory, "..");
@@ -371,7 +349,7 @@ impl Filesystem for ComicFS {
                     reply.add(3, 4, FileType::Directory, "tags");
                 }
             }
-            2 => {
+            Self::COMIC_ID => {
                 use schema::comics::dsl;
                 if offset == 0 {
                     let comics = dsl::comics.load::<Comic>(&self.conn);
@@ -388,9 +366,9 @@ impl Filesystem for ComicFS {
                     }
                 }
             }
-            3 => (),
+            Self::TAGS_ID => (),
             ino => {
-                let ino = Inode(ino);
+                let ino = Inode::from(ino);
                 let kind = ino.kind();
                 match kind {
                     InodeKind::Comic => {
@@ -448,7 +426,7 @@ impl Filesystem for ComicFS {
         size: u32,
         reply: ReplyData,
     ) {
-        let ino = Inode(ino);
+        let ino = Inode::from(ino);
         let kind = ino.kind();
         if kind != InodeKind::File {
             reply.error(EISDIR);
@@ -490,7 +468,69 @@ impl Filesystem for ComicFS {
         mode: u32,
         reply: ReplyEntry,
     ) {
-        todo!()
+        let parent = Inode::from(parent);
+        let kind = parent.kind();
+        match kind {
+            InodeKind::Special => {
+                match parent.0 {
+                    1 => {
+                        reply.error(EPERM);
+                    }
+                    // comics
+                    2 => {
+                        let name = name.to_str().unwrap();
+                        let comic = models::NewComic { name };
+                        let comic = self
+                            .conn
+                            .transaction::<_, diesel::result::Error, _>(|| {
+                                use schema::comics::dsl;
+
+                                dbg!(diesel::insert_into(dsl::comics)
+                                    .values(&comic)
+                                    .execute(&self.conn)?);
+
+                                Ok(dsl::comics
+                                    .order(dsl::id.desc())
+                                    .first::<models::Comic>(&self.conn)?)
+                            })
+                            .expect("Fail to insert");
+                        let ino = Inode::comic(comic.id);
+                        reply.entry(&ONE_SEC, &directory_attr(ino), 0);
+                    }
+                    3 => todo!(),
+                    _ => unreachable!(),
+                }
+            }
+            InodeKind::Comic => {
+                let name = name.to_str().unwrap();
+                let eposide = models::NewEposide {
+                    name,
+                    comic_id: i32::try_from(parent.id()).unwrap(),
+                };
+                let eposide = self
+                    .conn
+                    .transaction::<_, diesel::result::Error, _>(|| {
+                        use schema::eposides::dsl;
+
+                        dbg!(diesel::insert_into(dsl::eposides)
+                            .values(&eposide)
+                            .execute(&self.conn)?);
+
+                        Ok(dsl::eposides
+                            .order(dsl::id.desc())
+                            .first::<models::Eposide>(&self.conn)?)
+                    })
+                    .expect("Fail to insert");
+                let ino = Inode::eposide(eposide.id);
+                reply.entry(&ONE_SEC, &directory_attr(ino), 0);
+            }
+            InodeKind::Eposide | InodeKind::Tag => {
+                reply.error(EPERM);
+            }
+            InodeKind::File => {
+                reply.error(ENOTDIR);
+            }
+        }
     }
 
     fn create(

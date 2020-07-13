@@ -109,3 +109,16 @@ pub struct NewFile<'a> {
     pub content_hash: &'a str,
     pub eposid_id: i32,
 }
+
+impl NewFile<'_> {
+    pub fn insert(self, conn: &SqliteConnection) -> Result<File, diesel::result::Error> {
+        conn.transaction::<_, diesel::result::Error, _>(|| {
+            use files::dsl;
+
+            diesel::insert_into(files::table)
+                .values(&self)
+                .execute(conn)?;
+            Ok(dsl::files.order(dsl::id.desc()).first::<File>(conn)?)
+        })
+    }
+}

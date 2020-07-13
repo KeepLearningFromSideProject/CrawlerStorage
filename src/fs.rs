@@ -8,6 +8,7 @@ use fuse::{
     ReplyWrite, Request,
 };
 use libc::{EEXIST, EIO, EISDIR, ENOENT, ENOSYS, ENOTDIR, EPERM};
+use sha2::{Digest, Sha256};
 use std::{
     convert::{TryFrom, TryInto},
     env,
@@ -19,7 +20,7 @@ use std::{
 };
 
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
-enum InodeKind {
+pub enum InodeKind {
     File,
     Eposide,
     Comic,
@@ -193,6 +194,25 @@ fn directory_attr(inode: Inode) -> FileAttr {
     }
 }
 
+fn file_attr(inode: Inode) -> FileAttr {
+    FileAttr {
+        ino: inode.0,
+        size: 0,
+        blocks: 0,
+        atime: SystemTime::UNIX_EPOCH,
+        mtime: SystemTime::UNIX_EPOCH,
+        ctime: SystemTime::UNIX_EPOCH,
+        crtime: SystemTime::UNIX_EPOCH,
+        kind: FileType::RegularFile,
+        perm: 0o644,
+        nlink: 2,
+        uid: 1000,
+        gid: 1000,
+        rdev: 0,
+        flags: 0,
+    }
+}
+
 impl ComicFS {
     const ROOT_ID: u64 = 1;
     const COMIC_ID: u64 = 2;
@@ -277,6 +297,9 @@ impl Filesystem for ComicFS {
                         );
                         info.and_then(|info| {
                             let id = info.id;
+                            if info.content_hash == "" {
+                                Some(file_attr(Inode::file(id)));
+                            }
                             let path = generate_storage_path(&info.content_hash);
                             let meta = fs::metadata(&path).ok()?;
                             Some(convert_meta_to_attr(Inode::file(id).0, meta))
@@ -313,6 +336,9 @@ impl Filesystem for ComicFS {
                         let info = File::find(i32::try_from(ino.id()).unwrap(), &self.conn);
                         info.and_then(|info| {
                             let id = info.id;
+                            if info.content_hash == "" {
+                                Some(file_attr(Inode::file(id)));
+                            }
                             let path = generate_storage_path(&info.content_hash);
                             let meta = fs::metadata(&path).ok()?;
                             Some(convert_meta_to_attr(Inode::file(id).0, meta))
@@ -538,11 +564,24 @@ impl Filesystem for ComicFS {
         _req: &Request<'_>,
         parent: u64,
         name: &OsStr,
-        mode: u32,
+        _mode: u32,
         _flags: u32,
         reply: ReplyCreate,
     ) {
-        todo!()
+        let parent = Inode::from(parent);
+        if parent.kind() != InodeKind::Eposide {
+            reply.error(EPERM);
+            return;
+        }
+        let name = name.to_str().unwrap();
+        let value = models::NewFile {
+            name,
+            eposid_id: i32::try_from(parent.id()).unwrap(),
+            content_hash: "",
+        };
+        let file = value.insert(&self.conn).unwrap();
+        let ino = Inode::from(u64::try_from(file.id).unwrap());
+        reply.created(&ONE_SEC, &file_attr(ino), 0, 0, 0);
     }
 
     fn setattr(
@@ -575,7 +614,29 @@ impl Filesystem for ComicFS {
         _flags: u32,
         reply: ReplyWrite,
     ) {
-        todo!()
+        let ino = Inode::from(ino);
+        if ino.kind() != InodeKind::File {
+            reply.error(EISDIR);
+            return;
+        }
+        let info = match File::find(i32::try_from(ino.id()).unwrap(), &self.conn) {
+            Some(info) => info,
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+        let file = if info.content_hash == "" {
+            let hash = Sha256::digest(data);
+            let res = hex::encode(&hash);
+            let path = generate_storage_path(&res);
+            fs::File::create(&path).unwrap()
+        } else {
+            let path = generate_storage_path(&info.content_hash);
+            fs::OpenOptions::new().write(true).open(&path).unwrap()
+        };
+        let res = file.write_at(data, u64::try_from(offset).unwrap()).unwrap();
+        reply.written(u32::try_from(res).unwrap());
     }
 }
 

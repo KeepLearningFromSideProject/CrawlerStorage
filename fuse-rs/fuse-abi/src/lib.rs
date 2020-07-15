@@ -428,11 +428,17 @@ pub struct fuse_forget_in {
 
 #[cfg(feature = "abi-7-16")]
 #[repr(C)]
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct fuse_forget_one {
     pub nodeid: u64,
     pub nlookup: u64,
 }
+
+#[cfg(feature = "abi-7-16")]
+unsafe impl bytemuck::Zeroable for fuse_forget_one {}
+
+#[cfg(feature = "abi-7-16")]
+unsafe impl bytemuck::Pod for fuse_forget_one {}
 
 #[cfg(feature = "abi-7-16")]
 #[repr(C)]

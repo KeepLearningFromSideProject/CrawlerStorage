@@ -13,6 +13,7 @@ categories = ["external-ffi-bindings", "filesystem", "os::unix-apis"]
 license = "MIT"
 
 [dependencies]
+bytemuck = "1.2.0"
 
 [features]
 abi-7-9 = []

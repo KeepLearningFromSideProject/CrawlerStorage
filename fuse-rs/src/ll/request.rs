@@ -256,7 +256,6 @@ impl<'a> fmt::Display for Operation<'a> {
 }
 
 impl<'a> Operation<'a> {
-    #[allow(clippy::cast_ptr_alignment)]
     fn parse(opcode: &fuse_opcode, data: &mut ArgumentIterator<'a>) -> Option<Self> {
         unsafe {
             Some(match opcode {
@@ -340,13 +339,12 @@ impl<'a> Operation<'a> {
                 fuse_opcode::FUSE_BATCH_FORGET => {
                     let arg = data.fetch::<fuse_batch_forget_in>()?;
                     let bytes = data.fetch_all();
-                    let count = arg.count.try_into().unwrap();
+                    let count = TryInto::<usize>::try_into(arg.count).unwrap();
                     let expected_size = count * mem::size_of::<fuse_forget_one>();
                     if bytes.len() < expected_size {
                         return None;
                     }
-                    let nodes =
-                        slice::from_raw_parts(bytes.as_ptr() as *const fuse_forget_one, count);
+                    let nodes = bytemuck::cast_slice(&bytes[0..expected_size]);
                     Operation::BatchForget { arg, nodes }
                 }
                 fuse_opcode::FUSE_POLL => Operation::Poll { arg: data.fetch()? },

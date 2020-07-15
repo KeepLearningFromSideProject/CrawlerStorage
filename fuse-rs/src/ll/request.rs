@@ -7,7 +7,7 @@ use fuse_abi::*;
 use log::debug;
 use std::convert::{TryFrom, TryInto};
 use std::ffi::OsStr;
-use std::{error, fmt, mem, slice};
+use std::{error, fmt, mem};
 
 use super::argument::ArgumentIterator;
 

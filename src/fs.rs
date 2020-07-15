@@ -298,7 +298,7 @@ impl Filesystem for ComicFS {
                         info.and_then(|info| {
                             let id = info.id;
                             if info.content_hash == "" {
-                                Some(file_attr(Inode::file(id)));
+                                return Some(file_attr(Inode::file(id)));
                             }
                             let path = generate_storage_path(&info.content_hash);
                             let meta = fs::metadata(&path).ok()?;
@@ -337,7 +337,7 @@ impl Filesystem for ComicFS {
                         info.and_then(|info| {
                             let id = info.id;
                             if info.content_hash == "" {
-                                Some(file_attr(Inode::file(id)));
+                                return Some(file_attr(Inode::file(id)));
                             }
                             let path = generate_storage_path(&info.content_hash);
                             let meta = fs::metadata(&path).ok()?;

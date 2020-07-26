@@ -57,7 +57,7 @@ impl Eposide {
     }
 }
 
-#[derive(Queryable)]
+#[derive(Queryable, Identifiable)]
 pub struct File {
     pub id: i32,
     pub name: String,
@@ -86,6 +86,15 @@ impl File {
             .filter(dsl::name.eq(name))
             .first::<File>(conn)
             .ok()
+    }
+
+    pub fn update_content_hash(&self, content_hash: &str, conn: &SqliteConnection) {
+        use schema::files::dsl;
+
+        diesel::update(self)
+            .set(dsl::content_hash.eq(content_hash))
+            .execute(conn)
+            .unwrap();
     }
 }
 

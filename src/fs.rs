@@ -7,7 +7,12 @@ use fuse::{
     FileAttr, FileType, Filesystem, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEntry,
     ReplyWrite, Request,
 };
-use libc::{EEXIST, EIO, EISDIR, ENOENT, ENOSYS, ENOTDIR, EPERM};
+use libc::{EIO, EISDIR, ENOENT, ENOSYS, ENOTDIR, EPERM};
+use nix::{
+    fcntl::{open, OFlag},
+    sys::stat::Mode,
+    unistd::{close, ftruncate},
+};
 use sha2::{Digest, Sha256};
 use std::{
     convert::{TryFrom, TryInto},
@@ -15,7 +20,7 @@ use std::{
     ffi::OsStr,
     fmt, fs,
     os::unix::fs::{FileExt, MetadataExt},
-    path::{Path, PathBuf},
+    path::PathBuf,
     time::{Duration, SystemTime},
 };
 
@@ -488,10 +493,10 @@ impl Filesystem for ComicFS {
 
     fn mkdir(
         &mut self,
-        req: &Request<'_>,
+        _req: &Request<'_>,
         parent: u64,
         name: &OsStr,
-        mode: u32,
+        _mode: u32,
         reply: ReplyEntry,
     ) {
         let parent = Inode::from(parent);
@@ -511,9 +516,9 @@ impl Filesystem for ComicFS {
                             .transaction::<_, diesel::result::Error, _>(|| {
                                 use schema::comics::dsl;
 
-                                dbg!(diesel::insert_into(dsl::comics)
+                                diesel::insert_into(dsl::comics)
                                     .values(&comic)
-                                    .execute(&self.conn)?);
+                                    .execute(&self.conn)?;
 
                                 Ok(dsl::comics
                                     .order(dsl::id.desc())
@@ -538,9 +543,9 @@ impl Filesystem for ComicFS {
                     .transaction::<_, diesel::result::Error, _>(|| {
                         use schema::eposides::dsl;
 
-                        dbg!(diesel::insert_into(dsl::eposides)
+                        diesel::insert_into(dsl::eposides)
                             .values(&eposide)
-                            .execute(&self.conn)?);
+                            .execute(&self.conn)?;
 
                         Ok(dsl::eposides
                             .order(dsl::id.desc())
@@ -580,7 +585,7 @@ impl Filesystem for ComicFS {
             content_hash: "",
         };
         let file = value.insert(&self.conn).unwrap();
-        let ino = Inode::from(u64::try_from(file.id).unwrap());
+        let ino = Inode::file(file.id);
         reply.created(&ONE_SEC, &file_attr(ino), 0, 0, 0);
     }
 
@@ -588,12 +593,12 @@ impl Filesystem for ComicFS {
         &mut self,
         _req: &Request,
         ino: u64,
-        mode: Option<u32>,
-        uid: Option<u32>,
-        gid: Option<u32>,
+        _mode: Option<u32>,
+        _uid: Option<u32>,
+        _gid: Option<u32>,
         size: Option<u64>,
-        atime: Option<SystemTime>,
-        mtime: Option<SystemTime>,
+        _atime: Option<SystemTime>,
+        _mtime: Option<SystemTime>,
         _fh: Option<u64>,
         _crtime: Option<SystemTime>,
         _chgtime: Option<SystemTime>,
@@ -601,7 +606,42 @@ impl Filesystem for ComicFS {
         _flags: Option<u32>,
         reply: ReplyAttr,
     ) {
-        todo!()
+        let ino = Inode::from(ino);
+        if ino.kind() != InodeKind::File {
+            reply.error(ENOSYS);
+            return;
+        }
+        let info = match File::find(i32::try_from(ino.id()).unwrap(), &self.conn) {
+            Some(info) => info,
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+        if info.content_hash == "" {
+            reply.attr(&ONE_SEC, &file_attr(ino));
+            return;
+        }
+        let path = generate_storage_path(&info.content_hash);
+        let fd = match open(&path, OFlag::O_WRONLY, Mode::empty()) {
+            Ok(fd) => fd,
+            Err(err) => {
+                reply.error(convert_nix_error(err));
+                return;
+            }
+        };
+        scopeguard::defer! {
+            let _ = close(fd);
+        }
+        if let Some(size) = size {
+            if let Err(err) = ftruncate(fd, i64::try_from(size).unwrap()) {
+                reply.error(convert_nix_error(err));
+                return;
+            }
+        }
+        let meta = fs::metadata(&path).unwrap();
+        let attr = convert_meta_to_attr(ino.0, meta);
+        reply.attr(&ONE_SEC, &attr);
     }
 
     fn write(
@@ -630,6 +670,8 @@ impl Filesystem for ComicFS {
             let hash = Sha256::digest(data);
             let res = hex::encode(&hash);
             let path = generate_storage_path(&res);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            info.update_content_hash(&res, &self.conn);
             fs::File::create(&path).unwrap()
         } else {
             let path = generate_storage_path(&info.content_hash);

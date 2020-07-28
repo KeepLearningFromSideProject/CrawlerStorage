@@ -20,6 +20,11 @@ pub fn establish_connection() -> SqliteConnection {
 fn main() {
     dotenv().ok();
     pretty_env_logger::init();
+    color_backtrace::install();
+    ctrlc::set_handler(|| {
+        fuse::unmount("mnt".as_ref()).expect("Fail to unmount");
+    })
+    .expect("Fail to set ctrl c handler");
 
     let conn = establish_connection();
     fs::mount(conn, "mnt".as_ref());

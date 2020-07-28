@@ -13,6 +13,7 @@ use std::io;
 use std::mem;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::ptr;
 
 use crate::reply::ReplySender;
@@ -155,6 +156,19 @@ impl ReplySender for ChannelSender {
             error!("Failed to send FUSE reply: {}", err);
         }
     }
+}
+
+pub fn unmount(mountpoint: &Path) -> io::Result<()> {
+    Command::new("fusermount3")
+        .args(&[
+            OsStr::new("-q"),
+            OsStr::new("-u"),
+            OsStr::new("-z"),
+            OsStr::new("--"),
+            mountpoint.as_ref(),
+        ])
+        .status()?;
+    Ok(())
 }
 
 // /// Unmount an arbitrary mount point

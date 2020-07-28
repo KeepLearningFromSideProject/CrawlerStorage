@@ -51,9 +51,6 @@ pub struct fuse_session {
 }
 
 extern "C" {
-    // *_compat25 functions were introduced in FUSE 2.6 when function signatures changed.
-    // Therefore, the minimum version requirement for *_compat25 functions is libfuse-2.6.0.
-
     pub fn fuse_session_new(
         args: *const fuse_args,
         op: *const fuse_lowlevel_op,

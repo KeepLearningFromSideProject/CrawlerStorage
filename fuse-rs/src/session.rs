@@ -6,14 +6,14 @@
 //! for filesystem operations under its mount point.
 
 use libc::{EAGAIN, EINTR, ENODEV, ENOENT};
-use log::info;
+use log::{error, info};
 use std::ffi::OsStr;
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 use thread_scoped::{scoped, JoinGuard};
 
-use crate::channel::Channel;
+use crate::channel::{self, Channel};
 use crate::request::Request;
 use crate::Filesystem;
 
@@ -140,10 +140,10 @@ impl<'a> Drop for BackgroundSession<'a> {
         info!("Unmounting {}", self.mountpoint.display());
         // Unmounting the filesystem will eventually end the session loop,
         // drop the session and hence end the background thread.
-        // match channel::unmount(&self.mountpoint) {
-        //     Ok(()) => (),
-        //     Err(err) => error!("Failed to unmount {}: {}", self.mountpoint.display(), err),
-        // }
+        match channel::unmount(&self.mountpoint) {
+            Ok(()) => (),
+            Err(err) => error!("Failed to unmount {}: {}", self.mountpoint.display(), err),
+        }
     }
 }
 

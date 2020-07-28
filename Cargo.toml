@@ -22,3 +22,5 @@ scopeguard = "1.1.0"
 serde = { version = "1.0.114", features = ["derive"] }
 sha2 = "0.9.1"
 hex = "0.4.2"
+ctrlc = { version = "3.1.5", features = ["termination"] }
+color-backtrace = "0.4.2"

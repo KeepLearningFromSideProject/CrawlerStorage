@@ -5,7 +5,7 @@ extern crate diesel;
 
 use diesel::{Connection, SqliteConnection};
 use dotenv::dotenv;
-use std::env;
+use std::{convert::AsRef, env, path::Path, process::Command};
 
 mod fs;
 mod models;
@@ -25,6 +25,11 @@ fn main() {
         fuse::unmount("mnt".as_ref()).expect("Fail to unmount");
     })
     .expect("Fail to set ctrl c handler");
+
+    let diesel = AsRef::<Path>::as_ref("./diesel");
+    if diesel.metadata().is_ok() {
+        Command::new(diesel).args(&["setup"]).status().unwrap();
+    }
 
     let conn = establish_connection();
     fs::mount(conn, "mnt".as_ref());

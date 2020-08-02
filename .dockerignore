@@ -1,3 +1,5 @@
 target
 Dockerfile
 data.db
+build.sh
+run.sh

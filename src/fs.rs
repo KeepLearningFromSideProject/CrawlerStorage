@@ -13,6 +13,7 @@ use nix::{
     sys::stat::Mode,
     unistd::{close, ftruncate},
 };
+use once_cell::sync::Lazy;
 use sha2::{Digest, Sha256};
 use std::{
     convert::{TryFrom, TryInto},
@@ -32,6 +33,13 @@ pub enum InodeKind {
     Tag,
     Special,
 }
+
+static STORAGE_BASE: Lazy<PathBuf> = Lazy::new(|| {
+    let mut cwd = env::current_dir().unwrap();
+    let path = env::var_os("FILES_PATH").unwrap();
+    cwd.push(path);
+    cwd
+});
 
 #[derive(Copy, Clone, Hash, PartialEq, Eq)]
 pub struct Inode(u64);
@@ -709,8 +717,7 @@ fn convert_meta_to_attr(ino: u64, meta: fs::Metadata) -> fuse::FileAttr {
 }
 
 fn generate_storage_path(content_hash: &str) -> PathBuf {
-    let mut path = env::current_dir().unwrap();
-    path.push("storage");
+    let mut path = STORAGE_BASE.clone();
     path.push(&content_hash[0..2]);
     path.push(&content_hash);
     path

@@ -102,15 +102,6 @@ impl Inode {
         self.0 & Self::MARK_MASK == 0
     }
 
-    pub fn child_kind(self) -> Option<InodeKind> {
-        let kind = self.kind();
-        match kind {
-            InodeKind::Comic => Some(InodeKind::Eposide),
-            InodeKind::Eposide => Some(InodeKind::File),
-            _ => None,
-        }
-    }
-
     pub fn id(self) -> u64 {
         self.0 & Self::NODE_MASK
     }
@@ -254,11 +245,6 @@ impl ComicFS {
             .map(|info| directory_attr(Inode::eposide(info.id)))
     }
 
-    fn find_eposide_file_by_name(&self, id: u64, name: &str) -> Option<FileAttr> {
-        File::find_by_eposide_and_name(i32::try_from(id).unwrap(), name, &self.conn)
-            .map(|info| file_attr(Inode::file(info.id)))
-    }
-
     fn inode_to_storage(&self, ino: Inode) -> Option<PathBuf> {
         let info = File::find(i32::try_from(ino.id()).unwrap(), &self.conn)?;
         let path = generate_storage_path(&info.content_hash);
@@ -319,7 +305,7 @@ impl Filesystem for ComicFS {
                         })
                     }
                     InodeKind::Special | InodeKind::File => unreachable!(),
-                    _ => todo!(),
+                    _ => todo!("not yet support tags"),
                 };
 
                 match attr {
@@ -357,7 +343,7 @@ impl Filesystem for ComicFS {
                             Some(convert_meta_to_attr(Inode::file(id).0, meta))
                         })
                     }
-                    _ => todo!(),
+                    _ => todo!("not yet support tags"),
                 };
                 match attr {
                     Some(attr) => {
@@ -449,7 +435,7 @@ impl Filesystem for ComicFS {
                         }
                     }
                     InodeKind::File => unreachable!(),
-                    _ => todo!(),
+                    _ => todo!("not yet support tags"),
                 }
             }
         }
@@ -536,7 +522,7 @@ impl Filesystem for ComicFS {
                         let ino = Inode::comic(comic.id);
                         reply.entry(&ONE_SEC, &directory_attr(ino), 0);
                     }
-                    3 => todo!(),
+                    3 => todo!("not yet support tags"),
                     _ => unreachable!(),
                 }
             }
@@ -731,7 +717,7 @@ fn convert_file_type(kind: fs::FileType) -> fuse::FileType {
     } else if kind.is_symlink() {
         fuse::FileType::Symlink
     } else {
-        todo!()
+        unreachable!("doesn't support other file kind")
     }
 }
 

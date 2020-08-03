@@ -1,5 +1,5 @@
 [tool.poetry]
-name = "comic-fs"
+name = "storage-server"
 version = "0.1.0"
 description = ""
 authors = ["DanSnow <dododavid006@gmail.com>"]

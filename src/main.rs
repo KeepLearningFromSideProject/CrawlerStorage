@@ -3,6 +3,7 @@
 #[macro_use]
 extern crate diesel;
 
+use color_eyre::eyre::Result;
 use diesel::{Connection, SqliteConnection};
 use dotenv::dotenv;
 use std::{convert::AsRef, env, path::Path, process::Command};
@@ -17,14 +18,13 @@ pub fn establish_connection() -> SqliteConnection {
         .unwrap_or_else(|_| panic!("Error connecting to {}", database_url))
 }
 
-fn main() {
-    dotenv().ok();
+fn main() -> Result<()> {
+    color_eyre::install()?;
+    dotenv()?;
     pretty_env_logger::init();
-    color_backtrace::install();
     ctrlc::set_handler(|| {
         fuse::unmount("mnt".as_ref()).expect("Fail to unmount");
-    })
-    .expect("Fail to set ctrl c handler");
+    })?;
 
     let diesel = AsRef::<Path>::as_ref("./diesel");
     if diesel.metadata().is_ok() {
@@ -33,4 +33,5 @@ fn main() {
 
     let conn = establish_connection();
     fs::mount(conn, "mnt".as_ref());
+    Ok(())
 }

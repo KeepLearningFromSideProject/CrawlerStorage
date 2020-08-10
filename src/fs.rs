@@ -1,5 +1,5 @@
 use crate::{
-    models::{self, Comic, Eposide, File},
+    models::{self, Comic, Eposide, File, NewTag, Tag, Taggables},
     schema,
 };
 use diesel::prelude::*;
@@ -118,6 +118,10 @@ impl Inode {
 
     fn file(id: i32) -> Self {
         Self(Self::IS_FILE | u64::try_from(id).unwrap())
+    }
+
+    fn tag(id: i32) -> Self {
+        Self(Self::IS_TAG | u64::try_from(id).unwrap())
     }
 }
 
@@ -245,6 +249,10 @@ impl ComicFS {
             .map(|info| directory_attr(Inode::eposide(info.id)))
     }
 
+    fn find_tag_by_name(&self, name: &str) -> Option<FileAttr> {
+        Tag::find_by_name(name, &self.conn).map(|info| directory_attr(Inode::tag(info.id)))
+    }
+
     fn inode_to_storage(&self, ino: Inode) -> Option<PathBuf> {
         let info = File::find(i32::try_from(ino.id()).unwrap(), &self.conn)?;
         let path = generate_storage_path(&info.content_hash);
@@ -277,7 +285,16 @@ impl Filesystem for ComicFS {
                 }
             }
             Self::TAGS_ID => {
-                reply.error(ENOENT);
+                let name = name.to_str().unwrap();
+                let attr = self.find_tag_by_name(name);
+                match attr {
+                    Some(attr) => {
+                        reply.entry(&ONE_SEC, &attr, 0);
+                    }
+                    None => {
+                        reply.error(ENOENT);
+                    }
+                }
             }
             ino => {
                 let ino = Inode::from(ino);
@@ -305,7 +322,13 @@ impl Filesystem for ComicFS {
                         })
                     }
                     InodeKind::Special | InodeKind::File => unreachable!(),
-                    _ => todo!("not yet support tags"),
+                    InodeKind::Tag => {
+                        let info = Tag::find(i32::try_from(ino.id()).unwrap(), &self.conn);
+                        info.map(|info| {
+                            let ino = Inode::tag(info.id);
+                            directory_attr(ino)
+                        })
+                    }
                 };
 
                 match attr {
@@ -343,7 +366,14 @@ impl Filesystem for ComicFS {
                             Some(convert_meta_to_attr(Inode::file(id).0, meta))
                         })
                     }
-                    _ => todo!("not yet support tags"),
+                    InodeKind::Tag => {
+                        let info = Tag::find(i32::try_from(ino.id()).unwrap(), &self.conn);
+                        info.map(|info| {
+                            let ino = Inode::tag(info.id);
+                            directory_attr(ino)
+                        })
+                    }
+                    InodeKind::Special => unreachable!(),
                 };
                 match attr {
                     Some(attr) => {
@@ -391,7 +421,21 @@ impl Filesystem for ComicFS {
                     }
                 }
             }
-            Self::TAGS_ID => (),
+            Self::TAGS_ID => {
+                if offset == 0 {
+                    if let Some(tags) = Tag::list(&self.conn) {
+                        for (i, tag) in tags.iter().enumerate() {
+                            let ino = Inode::tag(tag.id);
+                            reply.add(
+                                ino.0,
+                                (i + 1).try_into().unwrap(),
+                                FileType::Directory,
+                                &tag.name,
+                            );
+                        }
+                    }
+                }
+            }
             ino => {
                 let ino = Inode::from(ino);
                 let kind = ino.kind();
@@ -434,8 +478,42 @@ impl Filesystem for ComicFS {
                             }
                         }
                     }
-                    InodeKind::File => unreachable!(),
-                    _ => todo!("not yet support tags"),
+                    InodeKind::Tag => {
+                        let taggables =
+                            Taggables::taggables(ino.id().try_into().unwrap(), &self.conn);
+                        for (i, taggable) in taggables.iter().enumerate() {
+                            match taggable {
+                                Taggables::Comic(comic) => {
+                                    let ino = Inode::comic(comic.id);
+                                    reply.add(
+                                        ino.0,
+                                        (i + 1).try_into().unwrap(),
+                                        FileType::Directory,
+                                        &comic.name,
+                                    );
+                                }
+                                Taggables::Eposide(eposide) => {
+                                    let ino = Inode::eposide(eposide.id);
+                                    reply.add(
+                                        ino.0,
+                                        (i + 1).try_into().unwrap(),
+                                        FileType::Directory,
+                                        &eposide.name,
+                                    );
+                                }
+                                Taggables::File(file) => {
+                                    let ino = Inode::file(file.id);
+                                    reply.add(
+                                        ino.0,
+                                        (i + 1).try_into().unwrap(),
+                                        FileType::RegularFile,
+                                        &file.name,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    InodeKind::File | InodeKind::Special => unreachable!(),
                 }
             }
         }
@@ -522,7 +600,13 @@ impl Filesystem for ComicFS {
                         let ino = Inode::comic(comic.id);
                         reply.entry(&ONE_SEC, &directory_attr(ino), 0);
                     }
-                    3 => todo!("not yet support tags"),
+                    3 => {
+                        let name = name.to_str().unwrap();
+                        let tag = NewTag { name };
+                        let tag = tag.insert(&self.conn).expect("Fail to insert tag");
+                        let ino = Inode::tag(tag.id);
+                        reply.entry(&ONE_SEC, &directory_attr(ino), 0);
+                    }
                     _ => unreachable!(),
                 }
             }

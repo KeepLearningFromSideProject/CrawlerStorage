@@ -1,4 +1,4 @@
-use crate::schema::{self, comics, eposides, files};
+use crate::schema::{self, comics, eposides, files, taggables, tags};
 use chrono::NaiveDateTime;
 use diesel::prelude::*;
 use serde::Deserialize;
@@ -98,6 +98,104 @@ impl File {
     }
 }
 
+#[derive(Queryable)]
+pub struct Tag {
+    pub id: i32,
+    pub name: String,
+    pub created_at: NaiveDateTime,
+}
+
+impl Tag {
+    pub fn list(conn: &SqliteConnection) -> Option<Vec<Self>> {
+        tags::table.load::<Self>(conn).ok()
+    }
+
+    pub fn find(id: i32, conn: &SqliteConnection) -> Option<Self> {
+        tags::table
+            .filter(tags::dsl::id.eq(id))
+            .first::<Self>(conn)
+            .ok()
+    }
+
+    pub fn find_by_name(name: &str, conn: &SqliteConnection) -> Option<Self> {
+        use tags::dsl;
+
+        dsl::tags
+            .filter(dsl::name.eq(name))
+            .first::<Self>(conn)
+            .ok()
+    }
+}
+
+#[derive(Queryable)]
+pub struct Taggable {
+    pub id: i32,
+    pub tag_id: i32,
+    pub taggable_id: i32,
+    pub taggable_type: String,
+}
+
+#[derive(strum_macros::EnumString)]
+enum TaggableKind {
+    Comic,
+    Eposide,
+    File,
+}
+
+pub enum Taggables {
+    Comic(Comic),
+    Eposide(Eposide),
+    File(File),
+}
+
+impl Taggables {
+    pub fn taggables(id: i32, conn: &SqliteConnection) -> Vec<Self> {
+        use taggables::dsl;
+
+        dsl::taggables
+            .filter(dsl::tag_id.eq(id))
+            .load::<Taggable>(conn)
+            .map(|taggables| {
+                taggables
+                    .iter()
+                    .filter_map(|taggable| {
+                        let kind = taggable.taggable_type.parse::<TaggableKind>().ok()?;
+                        match kind {
+                            TaggableKind::Comic => {
+                                use comics::dsl;
+
+                                dsl::comics
+                                    .filter(dsl::id.eq(taggable.taggable_id))
+                                    .first::<Comic>(conn)
+                                    .ok()
+                                    .map(Taggables::Comic)
+                            }
+                            TaggableKind::Eposide => {
+                                use eposides::dsl;
+
+                                dsl::eposides
+                                    .filter(dsl::id.eq(taggable.taggable_id))
+                                    .first::<Eposide>(conn)
+                                    .ok()
+                                    .map(Taggables::Eposide)
+                            }
+                            TaggableKind::File => {
+                                use files::dsl;
+
+                                dsl::files
+                                    .filter(dsl::id.eq(taggable.taggable_id))
+                                    .first::<File>(conn)
+                                    .ok()
+                                    .map(Taggables::File)
+                            }
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_else(|_| Vec::new())
+    }
+}
+
 #[derive(Deserialize, Insertable)]
 #[table_name = "comics"]
 pub struct NewComic<'a> {
@@ -128,6 +226,25 @@ impl NewFile<'_> {
                 .values(&self)
                 .execute(conn)?;
             Ok(dsl::files.order(dsl::id.desc()).first::<File>(conn)?)
+        })
+    }
+}
+
+#[derive(Deserialize, Insertable)]
+#[table_name = "tags"]
+pub struct NewTag<'a> {
+    pub name: &'a str,
+}
+
+impl NewTag<'_> {
+    pub fn insert(self, conn: &SqliteConnection) -> Result<Tag, diesel::result::Error> {
+        conn.transaction::<_, diesel::result::Error, _>(|| {
+            use tags::dsl;
+
+            diesel::insert_into(tags::table)
+                .values(&self)
+                .execute(conn)?;
+            Ok(dsl::tags.order(dsl::id.desc()).first::<Tag>(conn)?)
         })
     }
 }

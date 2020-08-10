@@ -26,8 +26,27 @@ table! {
     }
 }
 
+table! {
+    taggables (id) {
+        id -> Integer,
+        tag_id -> Integer,
+        taggable_id -> Integer,
+        taggable_type -> Text,
+    }
+}
+
+table! {
+    tags (id) {
+        id -> Integer,
+        name -> Text,
+        created_at -> Timestamp,
+    }
+}
+
 allow_tables_to_appear_in_same_query!(
     comics,
     eposides,
     files,
+    taggables,
+    tags,
 );

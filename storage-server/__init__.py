@@ -36,3 +36,25 @@ def add():
         print(task)
         downloader.download(task)
     return {"ok": True}
+
+
+@app.route("/list/<comic>/<eposide>")
+def list_eposide_files(comic: str, eposide: str):
+    path = mount_point / "comics" / comic / eposide
+    if not path.exists():
+        return {"ok": False, "status": 404}
+    return {"ok": True, "data": [child.name for child in path.iterdir()]}
+
+
+@app.route("/list/<comic>")
+def list_comic_eposide(comic: str):
+    path = mount_point / "comics" / comic
+    if not path.exists():
+        return {"ok": False, "status": 404}
+    return {"ok": True, "data": [child.name for child in path.iterdir()]}
+
+
+@app.route("/list")
+def list_comic():
+    path = mount_point / "comics"
+    return {"ok": True, "data": [child.name for child in path.iterdir()]}

@@ -17,6 +17,36 @@ Endpoint
     }
   }
   ```
+- `/list`:
+  response:
+  ```json
+  {
+    "ok": true,
+    "data": [
+      "comic1"
+    ]
+  }
+  ```
+- `/list/<comic_name>`:
+  response:
+  ```json
+  {
+    "ok": true,
+    "data": [
+      "ep1"
+    ]
+  }
+  ```
+- `/list/<comic_name>/<ep_name>`:
+  response:
+  ```json
+  {
+    "ok": true,
+    "data": [
+      "file1"
+    ]
+  }
+  ```
 
 Build
 -----

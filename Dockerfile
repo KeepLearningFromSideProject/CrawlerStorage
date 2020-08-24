@@ -4,7 +4,7 @@ RUN apt update && apt install libsqlite3-dev libfuse3-dev && cargo install diese
 
 COPY . .
 
-RUN diesel setup && cargo build --release
+RUN cargo build --release
 
 # `python-base` sets up all our shared environment variables
 FROM python:3.8-slim-buster as python-base
@@ -60,10 +60,13 @@ COPY poetry.lock pyproject.toml ./
 RUN poetry install --no-dev
 
 FROM python-base as production
+EXPOSE 5000
 RUN apt-get update \
     && apt-get install --no-install-recommends -y libfuse3-3 \
-    && rm -rf /var/lib/apt/lists/*
-COPY entrypoint.sh migrations Cargo.toml ./
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /storage/files
+COPY migrations  /migrations/
+COPY entrypoint.sh Cargo.toml ./
 COPY --from=build /target/release/comic-fs /usr/local/cargo/bin/diesel .flaskenv .env ./
 COPY --from=builder-base $PYSETUP_PATH $PYSETUP_PATH
 COPY ./storage-server /storage-server/

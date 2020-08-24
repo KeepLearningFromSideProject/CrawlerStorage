@@ -3,3 +3,4 @@ Dockerfile
 data.db
 build.sh
 run.sh
+test.sh

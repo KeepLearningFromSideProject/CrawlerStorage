@@ -10,7 +10,7 @@ trap 'docker kill "$id" > /dev/null' EXIT
 echo "wait service up"
 sleep 5
 
-if ! pytest; then
+if ! poetry run pytest; then
   docker logs "$id"
   exit 1
 fi

@@ -1,5 +1,6 @@
+use crate::hex::Hex;
 use crate::{
-    models::{self, Comic, Eposide, File, NewTag, Tag, Taggables},
+    models::{self, Comic, Episode, File, NewTag, Tag, Taggable, Taggables},
     schema,
 };
 use diesel::prelude::*;
@@ -7,23 +8,28 @@ use fuse::{
     FileAttr, FileType, Filesystem, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEntry,
     ReplyWrite, Request,
 };
-use libc::{EIO, EISDIR, ENOENT, ENOSYS, ENOTDIR, EPERM};
+use libc::{EINVAL, EIO, EISDIR, ENOENT, ENOSYS, ENOTDIR, EPERM};
 use nix::{
     fcntl::{open, OFlag},
     sys::stat::Mode,
     unistd::{close, ftruncate},
 };
 use once_cell::sync::Lazy;
+use path_clean::PathClean;
 use sha2::{Digest, Sha256};
 use std::{
     convert::{TryFrom, TryInto},
     env,
-    ffi::OsStr,
+    ffi::{CString, OsStr},
     fmt, fs,
-    os::unix::fs::{FileExt, MetadataExt},
-    path::PathBuf,
+    os::unix::{
+        ffi::{OsStrExt, OsStringExt},
+        fs::{FileExt, MetadataExt},
+    },
+    path::{Path, PathBuf},
     time::{Duration, SystemTime},
 };
+use tracing::{info, info_span};
 
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
 pub enum InodeKind {
@@ -31,6 +37,7 @@ pub enum InodeKind {
     Eposide,
     Comic,
     Tag,
+    Tagged,
     Special,
 }
 
@@ -53,7 +60,7 @@ impl From<u64> for Inode {
 impl fmt::Debug for Inode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Inode")
-            .field("value", &self.0)
+            .field("value", &Hex(self.0))
             .field("_kind", &self.kind())
             .field("_id", &self.id())
             .finish()
@@ -65,7 +72,9 @@ impl Inode {
     pub const IS_EPOSIDE: u64 = 1 << 62;
     pub const IS_COMIC: u64 = 1 << 61;
     pub const IS_TAG: u64 = 1 << 60;
-    pub const MARK_MASK: u64 = Self::IS_COMIC | Self::IS_EPOSIDE | Self::IS_FILE | Self::IS_TAG;
+    pub const IS_TAGGED: u64 = 1 << 59;
+    pub const MARK_MASK: u64 =
+        Self::IS_COMIC | Self::IS_EPOSIDE | Self::IS_FILE | Self::IS_TAG | Self::IS_TAGGED;
     pub const NODE_MASK: u64 = !Self::MARK_MASK;
 
     pub fn kind(self) -> InodeKind {
@@ -77,6 +86,8 @@ impl Inode {
             InodeKind::Comic
         } else if self.is_tag() {
             InodeKind::Tag
+        } else if self.is_tagged() {
+            InodeKind::Tagged
         } else {
             InodeKind::Special
         }
@@ -96,6 +107,10 @@ impl Inode {
 
     pub fn is_tag(self) -> bool {
         self.0 & Self::IS_TAG != 0
+    }
+
+    pub fn is_tagged(self) -> bool {
+        self.0 & Self::IS_TAGGED != 0
     }
 
     pub fn is_special(self) -> bool {
@@ -123,10 +138,17 @@ impl Inode {
     fn tag(id: i32) -> Self {
         Self(Self::IS_TAG | u64::try_from(id).unwrap())
     }
+
+    fn tagged(id: i32) -> Self {
+        Self(Self::IS_TAGGED | u64::try_from(id).unwrap())
+    }
 }
 
+#[derive(derive_more::DebugCustom)]
+#[debug(fmt = "ComicFS {{ base: {:?} }}", base)]
 pub struct ComicFS {
     conn: SqliteConnection,
+    base: PathBuf,
 }
 
 static ONE_SEC: Duration = Duration::from_secs(1);
@@ -202,6 +224,25 @@ fn directory_attr(inode: Inode) -> FileAttr {
     }
 }
 
+fn symlink_attr(inode: Inode, size: u64) -> FileAttr {
+    FileAttr {
+        ino: inode.0,
+        size,
+        blocks: 0,
+        atime: SystemTime::UNIX_EPOCH,
+        mtime: SystemTime::UNIX_EPOCH,
+        ctime: SystemTime::UNIX_EPOCH,
+        crtime: SystemTime::UNIX_EPOCH,
+        kind: FileType::Symlink,
+        perm: 0o755,
+        nlink: 1,
+        uid: 1000,
+        gid: 1000,
+        rdev: 0,
+        flags: 0,
+    }
+}
+
 fn file_attr(inode: Inode) -> FileAttr {
     FileAttr {
         ino: inode.0,
@@ -226,8 +267,8 @@ impl ComicFS {
     const COMIC_ID: u64 = 2;
     const TAGS_ID: u64 = 3;
 
-    fn new(conn: SqliteConnection) -> Self {
-        Self { conn }
+    fn new(conn: SqliteConnection, base: PathBuf) -> Self {
+        Self { conn, base }
     }
 
     fn find_comic_by_inode(&self, inode: Inode) -> Option<FileAttr> {
@@ -236,7 +277,7 @@ impl ComicFS {
     }
 
     fn find_eposide_by_inode(&self, inode: Inode) -> Option<FileAttr> {
-        let res = Eposide::find(i32::try_from(inode.id()).unwrap(), &self.conn);
+        let res = Episode::find(i32::try_from(inode.id()).unwrap(), &self.conn);
         res.map(|info| directory_attr(Inode::eposide(info.id)))
     }
 
@@ -245,7 +286,7 @@ impl ComicFS {
     }
 
     fn find_comic_eposide_by_name(&self, id: u64, name: &str) -> Option<FileAttr> {
-        Eposide::find_by_comic_and_name(i32::try_from(id).unwrap(), name, &self.conn)
+        Episode::find_by_comic_and_name(i32::try_from(id).unwrap(), name, &self.conn)
             .map(|info| directory_attr(Inode::eposide(info.id)))
     }
 
@@ -258,9 +299,114 @@ impl ComicFS {
         let path = generate_storage_path(&info.content_hash);
         Some(path)
     }
+
+    fn resolve(&self, path: &Path) -> Option<Inode> {
+        let mut parent = Inode::from(1);
+        for component in path.components() {
+            let id = parent.0;
+            let kind = parent.kind();
+            let name = component.as_os_str();
+
+            match kind {
+                InodeKind::Special => match id {
+                    Self::ROOT_ID => {
+                        if name == "comics" {
+                            parent = Inode::from(Self::COMIC_ID);
+                        } else if name == "tags" {
+                            parent = Inode::from(Self::TAGS_ID);
+                        } else {
+                            unreachable!();
+                        }
+                    }
+                    Self::COMIC_ID => {
+                        let info = Comic::find_by_name(name.to_str().unwrap(), &self.conn)?;
+                        parent = Inode::comic(info.id);
+                    }
+                    Self::TAGS_ID => {
+                        let info = Tag::find_by_name(name.to_str().unwrap(), &self.conn)?;
+                        parent = Inode::tag(info.id)
+                    }
+                    _ => unreachable!(),
+                },
+                InodeKind::Comic => {
+                    let info = Episode::find_by_comic_and_name(
+                        parent.id().try_into().unwrap(),
+                        name.to_str().unwrap(),
+                        &self.conn,
+                    )?;
+                    parent = Inode::eposide(info.id);
+                }
+                InodeKind::Eposide => {
+                    let info = File::find_by_eposide_and_name(
+                        parent.id().try_into().unwrap(),
+                        name.to_str().unwrap(),
+                        &self.conn,
+                    )?;
+                    parent = Inode::file(info.id);
+                }
+                InodeKind::Tag => todo!(),
+                InodeKind::File => {
+                    unreachable!();
+                }
+                InodeKind::Tagged => {
+                    unreachable!();
+                }
+            }
+        }
+        Some(parent)
+    }
+
+    fn resolve_inode(&self, ino: Inode) -> Option<PathBuf> {
+        let mut next = Some(ino);
+        let mut components = vec![];
+
+        while let Some(ino) = next {
+            match ino.kind() {
+                InodeKind::Special => match ino.0 {
+                    Self::ROOT_ID => {
+                        components.push(self.base.clone());
+                        next = None;
+                    }
+                    Self::COMIC_ID => {
+                        components.push(PathBuf::from("comics".to_owned()));
+                        next = Some(Inode::from(Self::ROOT_ID));
+                    }
+                    Self::TAGS_ID => {
+                        components.push(PathBuf::from("tags".to_owned()));
+                        next = Some(Inode::from(Self::ROOT_ID));
+                    }
+                    _ => unreachable!(),
+                },
+                InodeKind::Comic => {
+                    let info = Comic::find(ino.id().try_into().unwrap(), &self.conn)?;
+                    components.push(PathBuf::from(info.name.clone()));
+                    next = Some(Inode::from(Self::COMIC_ID));
+                }
+                InodeKind::Eposide => {
+                    let info = Episode::find(ino.id().try_into().unwrap(), &self.conn)?;
+                    components.push(PathBuf::from(info.name.clone()));
+                    next = Some(Inode::comic(info.comic_id));
+                }
+                InodeKind::File => {
+                    let info = File::find(ino.id().try_into().unwrap(), &self.conn)?;
+                    components.push(PathBuf::from(info.name.clone()));
+                    next = Some(Inode::eposide(info.eposid_id));
+                }
+                InodeKind::Tag => {
+                    let info = Tag::find(ino.id().try_into().unwrap(), &self.conn)?;
+                    components.push(PathBuf::from(info.name.clone()));
+                    next = Some(Inode::from(Self::TAGS_ID));
+                }
+                _ => todo!(),
+            }
+        }
+
+        Some(components.into_iter().rev().collect::<PathBuf>())
+    }
 }
 
 impl Filesystem for ComicFS {
+    #[tracing::instrument(fields(unique = _req.unique()),skip(self, _req,  reply))]
     fn lookup(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEntry) {
         match parent {
             Self::ROOT_ID => {
@@ -321,13 +467,63 @@ impl Filesystem for ComicFS {
                             Some(convert_meta_to_attr(Inode::file(id).0, meta))
                         })
                     }
-                    InodeKind::Special | InodeKind::File => unreachable!(),
+                    InodeKind::Special | InodeKind::File | InodeKind::Tagged => unreachable!(),
                     InodeKind::Tag => {
-                        let info = Tag::find(i32::try_from(ino.id()).unwrap(), &self.conn);
-                        info.map(|info| {
-                            let ino = Inode::tag(info.id);
-                            directory_attr(ino)
-                        })
+                        let span = info_span!("lookop tagged");
+                        let _guard = span.enter();
+                        let expected_name = name.to_str().unwrap();
+                        info!(expected_name);
+                        let files =
+                            Taggables::taggables(i32::try_from(ino.id()).unwrap(), &self.conn);
+                        info!(?files);
+                        let res = files.iter().find_map(|file| match file {
+                            Taggables::Comic { id, name, .. } => {
+                                if name == expected_name {
+                                    let id = *id;
+                                    info!(id, "found comic");
+                                    let path = self
+                                        .resolve_inode(Inode::comic(id.try_into().unwrap()))
+                                        .unwrap();
+                                    Some((id, path))
+                                } else {
+                                    None
+                                }
+                            }
+                            Taggables::Episode { id, name, .. } => {
+                                if name == expected_name {
+                                    let id = *id;
+                                    info!(id, "found episode");
+                                    let path = self
+                                        .resolve_inode(Inode::eposide(id.try_into().unwrap()))
+                                        .unwrap();
+                                    Some((id, path))
+                                } else {
+                                    None
+                                }
+                            }
+                            Taggables::File { id, name, .. } => {
+                                if name == expected_name {
+                                    let id = *id;
+                                    info!(id, "found file");
+                                    let path = self
+                                        .resolve_inode(Inode::file(id.try_into().unwrap()))
+                                        .unwrap();
+                                    Some((id, path))
+                                } else {
+                                    None
+                                }
+                            }
+                        });
+                        let (id, path) = match res {
+                            Some(id) => id,
+                            None => {
+                                info!("not found");
+                                reply.error(ENOENT);
+                                return;
+                            }
+                        };
+                        let ino = Inode::tagged(id);
+                        Some(symlink_attr(ino, path.as_os_str().len() as u64))
                     }
                 };
 
@@ -343,6 +539,7 @@ impl Filesystem for ComicFS {
         }
     }
 
+    #[tracing::instrument(fields(unique = _req.unique(), ino = ?Inode::from(ino)),skip(self, _req, ino, reply))]
     fn getattr(&mut self, _req: &Request<'_>, ino: u64, reply: ReplyAttr) {
         match ino {
             Self::ROOT_ID => reply.attr(&ONE_SEC, &ROOT_DIR_ATTR),
@@ -373,6 +570,24 @@ impl Filesystem for ComicFS {
                             directory_attr(ino)
                         })
                     }
+                    InodeKind::Tagged => {
+                        let info = Taggable::find(i32::try_from(ino.id()).unwrap(), &self.conn);
+                        info!(?info);
+                        info.map(|info| {
+                            let target = match info.taggable_type.as_str() {
+                                "comic" => Inode::comic(info.taggable_id),
+                                "eposide" => Inode::eposide(info.taggable_id),
+                                "file" => Inode::file(info.taggable_id),
+                                _ => unreachable!(),
+                            };
+                            let path = self.resolve_inode(target).unwrap();
+                            let len = path.as_os_str().len();
+                            assert_eq!(len, path.as_os_str().as_bytes().len());
+                            let attr = symlink_attr(ino, len as u64);
+                            info!(?attr);
+                            attr
+                        })
+                    }
                     InodeKind::Special => unreachable!(),
                 };
                 match attr {
@@ -387,6 +602,7 @@ impl Filesystem for ComicFS {
         }
     }
 
+    #[tracing::instrument(fields(unique = _req.unique(), ino = ?Hex(ino)),skip(self, _req, ino, _fh, reply))]
     fn readdir(
         &mut self,
         _req: &Request<'_>,
@@ -445,7 +661,7 @@ impl Filesystem for ComicFS {
                         if offset == 0 {
                             let eposides = dsl::eposides
                                 .filter(dsl::comic_id.eq(i32::try_from(ino.id()).unwrap()))
-                                .load::<Eposide>(&self.conn);
+                                .load::<Episode>(&self.conn);
                             if let Ok(eposides) = eposides {
                                 for (i, eposide) in eposides.iter().enumerate() {
                                     let ino = Inode::eposide(eposide.id);
@@ -483,43 +699,44 @@ impl Filesystem for ComicFS {
                             Taggables::taggables(ino.id().try_into().unwrap(), &self.conn);
                         for (i, taggable) in taggables.iter().enumerate() {
                             match taggable {
-                                Taggables::Comic(comic) => {
-                                    let ino = Inode::comic(comic.id);
+                                Taggables::Comic { id, name, .. } => {
+                                    let ino = Inode::tagged(*id);
                                     reply.add(
                                         ino.0,
                                         (i + 1).try_into().unwrap(),
-                                        FileType::Directory,
-                                        &comic.name,
+                                        FileType::Symlink,
+                                        &name,
                                     );
                                 }
-                                Taggables::Eposide(eposide) => {
-                                    let ino = Inode::eposide(eposide.id);
+                                Taggables::Episode { id, name, .. } => {
+                                    let ino = Inode::tagged(*id);
                                     reply.add(
                                         ino.0,
                                         (i + 1).try_into().unwrap(),
-                                        FileType::Directory,
-                                        &eposide.name,
+                                        FileType::Symlink,
+                                        &name,
                                     );
                                 }
-                                Taggables::File(file) => {
-                                    let ino = Inode::file(file.id);
+                                Taggables::File { id, name, .. } => {
+                                    let ino = Inode::tagged(*id);
                                     reply.add(
                                         ino.0,
                                         (i + 1).try_into().unwrap(),
-                                        FileType::RegularFile,
-                                        &file.name,
+                                        FileType::Symlink,
+                                        &name,
                                     );
                                 }
                             }
                         }
                     }
-                    InodeKind::File | InodeKind::Special => unreachable!(),
+                    InodeKind::File | InodeKind::Special | InodeKind::Tagged => unreachable!(),
                 }
             }
         }
         reply.ok();
     }
 
+    #[tracing::instrument(fields(unique = _req.unique(), ino = ?Hex(ino)),skip(self, _req, ino, _fh, reply))]
     fn read(
         &mut self,
         _req: &Request<'_>,
@@ -627,7 +844,7 @@ impl Filesystem for ComicFS {
 
                         Ok(dsl::eposides
                             .order(dsl::id.desc())
-                            .first::<models::Eposide>(&self.conn)?)
+                            .first::<models::Episode>(&self.conn)?)
                     })
                     .expect("Fail to insert");
                 let ino = Inode::eposide(eposide.id);
@@ -636,7 +853,7 @@ impl Filesystem for ComicFS {
             InodeKind::Eposide | InodeKind::Tag => {
                 reply.error(EPERM);
             }
-            InodeKind::File => {
+            InodeKind::File | InodeKind::Tagged => {
                 reply.error(ENOTDIR);
             }
         }
@@ -758,6 +975,130 @@ impl Filesystem for ComicFS {
         let res = file.write_at(data, u64::try_from(offset).unwrap()).unwrap();
         reply.written(u32::try_from(res).unwrap());
     }
+
+    #[tracing::instrument(fields(unique = _req.unique(), ino = ?Hex(ino)),skip(self, _req, ino, reply))]
+    fn readlink(&mut self, _req: &Request, ino: u64, reply: ReplyData) {
+        let ino = Inode::from(ino);
+        if ino.kind() != InodeKind::Tagged {
+            reply.error(EINVAL);
+            return;
+        }
+        let info = match Taggable::find_info(ino.id().try_into().unwrap(), &self.conn) {
+            Some(info) => info,
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+        info!(?ino, ?info);
+        let ino = match info {
+            Taggables::Comic { comic, .. } => Inode::comic(comic.id),
+            Taggables::Episode { episode, .. } => Inode::eposide(episode.id),
+            Taggables::File { file, .. } => Inode::file(file.id),
+        };
+        let path = self.resolve_inode(ino).unwrap();
+        info!(path = %path.display(), path.len = path.as_os_str().len());
+        let bytes = path.as_os_str().as_bytes();
+        reply.data(bytes);
+    }
+
+    fn link(
+        &mut self,
+        _req: &Request,
+        ino: u64,
+        newparent: u64,
+        _newname: &OsStr,
+        reply: ReplyEntry,
+    ) {
+        let ino = Inode::from(ino);
+        let tag_ino = Inode::from(newparent);
+        match ino.kind() {
+            InodeKind::Special | InodeKind::Tag => {
+                reply.error(EPERM);
+                return;
+            }
+            InodeKind::Comic => {
+                Taggable::comic(
+                    ino.id().try_into().unwrap(),
+                    tag_ino.id().try_into().unwrap(),
+                    &self.conn,
+                )
+                .unwrap();
+                reply.entry(&ONE_SEC, &directory_attr(ino), 0);
+            }
+            InodeKind::Eposide => {
+                todo!();
+            }
+            InodeKind::File => {
+                todo!();
+            }
+            InodeKind::Tagged => unreachable!(),
+        }
+    }
+
+    fn symlink(
+        &mut self,
+        _req: &Request,
+        parent: u64,
+        _name: &OsStr,
+        link: &Path,
+        reply: ReplyEntry,
+    ) {
+        let tag_ino = Inode::from(parent);
+        if tag_ino.kind() != InodeKind::Tag {
+            reply.error(EPERM);
+            return;
+        }
+        let path = if link.is_absolute() {
+            link.to_owned()
+        } else {
+            let path = match self.resolve_inode(Inode::from(parent)) {
+                Some(path) => path,
+                None => {
+                    reply.error(ENOENT);
+                    return;
+                }
+            };
+            path.join(link).clean()
+        };
+        let target = dbg!(path.strip_prefix(&self.base).unwrap());
+        let ino = match self.resolve(target) {
+            Some(ino) => ino,
+            None => {
+                reply.error(EPERM);
+                return;
+            }
+        };
+        match ino.kind() {
+            InodeKind::Special | InodeKind::Tag | InodeKind::Tagged => {
+                reply.error(EPERM);
+                return;
+            }
+            InodeKind::Comic => {
+                let info = Taggable::comic(
+                    ino.id().try_into().unwrap(),
+                    tag_ino.id().try_into().unwrap(),
+                    &self.conn,
+                )
+                .unwrap();
+
+                let path = self
+                    .resolve_inode(Inode::comic(info.id.try_into().unwrap()))
+                    .unwrap();
+                reply.entry(
+                    &ONE_SEC,
+                    &symlink_attr(Inode::tagged(info.id), path.as_os_str().len() as u64),
+                    0,
+                );
+            }
+            InodeKind::Eposide => {
+                todo!();
+            }
+            InodeKind::File => {
+                todo!();
+            }
+        }
+    }
 }
 
 fn convert_nix_error(err: nix::Error) -> i32 {
@@ -810,7 +1151,15 @@ pub fn mount(conn: SqliteConnection, mountpoint: &OsStr) {
         .iter()
         .map(|o| o.as_ref())
         .collect::<Vec<&OsStr>>();
-    fuse::mount(ComicFS::new(conn), mountpoint, &options).unwrap();
+    fuse::mount(
+        ComicFS::new(
+            conn,
+            fs::canonicalize(mountpoint).expect("Fail to resolve mount point"),
+        ),
+        mountpoint,
+        &options,
+    )
+    .unwrap();
 }
 
 #[cfg(test)]

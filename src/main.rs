@@ -7,8 +7,14 @@ use color_eyre::eyre::Result;
 use diesel::{Connection, SqliteConnection};
 use dotenv::dotenv;
 use std::{convert::AsRef, env, path::Path, process::Command};
+use tracing::subscriber::set_global_default;
+use tracing_appender::{non_blocking, rolling};
+use tracing_error::ErrorLayer;
+use tracing_log::LogTracer;
+use tracing_subscriber::{fmt, layer::SubscriberExt, EnvFilter, Registry};
 
 mod fs;
+mod hex;
 mod models;
 mod schema;
 
@@ -21,7 +27,21 @@ pub fn establish_connection() -> SqliteConnection {
 fn main() -> Result<()> {
     color_eyre::install()?;
     dotenv()?;
-    pretty_env_logger::init();
+    LogTracer::init().expect("Failed to set logger");
+
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let formatting_layer = fmt::layer().pretty().with_writer(std::io::stderr);
+    let file_appender = rolling::never("logs", "comic-fs.log");
+    let (non_blocking_appender, _guard) = non_blocking(file_appender);
+    let file_layer = fmt::layer()
+        .with_ansi(false)
+        .with_writer(non_blocking_appender);
+    let subscriber = Registry::default()
+        .with(env_filter)
+        .with(ErrorLayer::default())
+        .with(formatting_layer)
+        .with(file_layer);
+    set_global_default(subscriber).expect("Failed to set subscriber");
     ctrlc::set_handler(|| {
         fuse::unmount("mnt".as_ref()).expect("Fail to unmount");
     })?;

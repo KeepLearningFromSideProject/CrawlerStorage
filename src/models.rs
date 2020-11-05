@@ -27,15 +27,15 @@ impl Comic {
     }
 }
 
-#[derive(Queryable)]
-pub struct Eposide {
+#[derive(Queryable, Debug)]
+pub struct Episode {
     pub id: i32,
     pub name: String,
     pub comic_id: i32,
     pub created_at: NaiveDateTime,
 }
 
-impl Eposide {
+impl Episode {
     pub fn find(id: i32, conn: &SqliteConnection) -> Option<Self> {
         use schema::eposides::dsl;
 
@@ -52,12 +52,12 @@ impl Eposide {
         dsl::eposides
             .filter(dsl::comic_id.eq(comic_id))
             .filter(dsl::name.eq(name))
-            .first::<Eposide>(conn)
+            .first::<Episode>(conn)
             .ok()
     }
 }
 
-#[derive(Queryable, Identifiable)]
+#[derive(Queryable, Identifiable, Debug)]
 pub struct File {
     pub id: i32,
     pub name: String,
@@ -127,7 +127,7 @@ impl Tag {
     }
 }
 
-#[derive(Queryable)]
+#[derive(Queryable, Debug)]
 pub struct Taggable {
     pub id: i32,
     pub tag_id: i32,
@@ -135,17 +135,63 @@ pub struct Taggable {
     pub taggable_type: String,
 }
 
-#[derive(strum_macros::EnumString)]
+impl Taggable {
+    pub fn find(id: i32, conn: &SqliteConnection) -> Option<Self> {
+        use taggables::dsl;
+
+        dsl::taggables.find(id).first::<Taggable>(conn).ok()
+    }
+
+    pub fn find_info(id: i32, conn: &SqliteConnection) -> Option<Taggables> {
+        Taggables::from_taggable(&Self::find(id, conn)?, conn)
+    }
+
+    pub fn comic(tag_id: i32, comic_id: i32, conn: &SqliteConnection) -> Option<Self> {
+        use taggables::dsl;
+        let value = NewTaggable {
+            tag_id,
+            taggable_id: comic_id,
+            taggable_type: "comic",
+        };
+
+        conn.transaction::<_, diesel::result::Error, _>(|| {
+            diesel::insert_into(taggables::table)
+                .values(&value)
+                .execute(conn)?;
+
+            Ok(dsl::taggables
+                .order(dsl::id.desc())
+                .first::<Taggable>(conn)?)
+        })
+        .ok()
+    }
+}
+
+#[derive(strum_macros::EnumString, Debug)]
+#[strum(serialize_all = "snake_case")]
 enum TaggableKind {
     Comic,
     Eposide,
     File,
 }
 
+#[derive(Debug)]
 pub enum Taggables {
-    Comic(Comic),
-    Eposide(Eposide),
-    File(File),
+    Comic {
+        id: i32,
+        comic: Comic,
+        name: String,
+    },
+    Episode {
+        id: i32,
+        episode: Episode,
+        name: String,
+    },
+    File {
+        id: i32,
+        file: File,
+        name: String,
+    },
 }
 
 impl Taggables {
@@ -158,41 +204,64 @@ impl Taggables {
             .map(|taggables| {
                 taggables
                     .iter()
-                    .filter_map(|taggable| {
-                        let kind = taggable.taggable_type.parse::<TaggableKind>().ok()?;
-                        match kind {
-                            TaggableKind::Comic => {
-                                use comics::dsl;
-
-                                dsl::comics
-                                    .filter(dsl::id.eq(taggable.taggable_id))
-                                    .first::<Comic>(conn)
-                                    .ok()
-                                    .map(Taggables::Comic)
-                            }
-                            TaggableKind::Eposide => {
-                                use eposides::dsl;
-
-                                dsl::eposides
-                                    .filter(dsl::id.eq(taggable.taggable_id))
-                                    .first::<Eposide>(conn)
-                                    .ok()
-                                    .map(Taggables::Eposide)
-                            }
-                            TaggableKind::File => {
-                                use files::dsl;
-
-                                dsl::files
-                                    .filter(dsl::id.eq(taggable.taggable_id))
-                                    .first::<File>(conn)
-                                    .ok()
-                                    .map(Taggables::File)
-                            }
-                        }
-                    })
+                    .filter_map(|taggable| Self::from_taggable(taggable, conn))
                     .collect::<Vec<_>>()
             })
             .unwrap_or_else(|_| Vec::new())
+    }
+
+    fn from_taggable(taggable: &Taggable, conn: &SqliteConnection) -> Option<Self> {
+        let kind = taggable.taggable_type.parse::<TaggableKind>().ok()?;
+        match kind {
+            TaggableKind::Comic => {
+                use comics::dsl;
+
+                dsl::comics
+                    .filter(dsl::id.eq(taggable.taggable_id))
+                    .first::<Comic>(conn)
+                    .ok()
+                    .map(|comic| {
+                        let name = comic.name.clone();
+
+                        Taggables::Comic {
+                            id: taggable.id,
+                            comic,
+                            name,
+                        }
+                    })
+            }
+            TaggableKind::Eposide => {
+                use eposides::dsl;
+
+                let episode = dsl::eposides
+                    .filter(dsl::id.eq(taggable.taggable_id))
+                    .first::<Episode>(conn)
+                    .ok()?;
+                let comic = Comic::find(episode.comic_id, conn)?;
+                let name = format!("{}_{}", comic.name, episode.name);
+                Some(Taggables::Episode {
+                    id: taggable.id,
+                    episode,
+                    name,
+                })
+            }
+            TaggableKind::File => {
+                use files::dsl;
+
+                let file = dsl::files
+                    .filter(dsl::id.eq(taggable.taggable_id))
+                    .first::<File>(conn)
+                    .ok()?;
+                let episode = Episode::find(file.eposid_id, conn)?;
+                let comic = Comic::find(episode.comic_id, conn)?;
+                let name = format!("{}_{}_{}", comic.name, episode.name, file.name);
+                Some(Taggables::File {
+                    id: taggable.id,
+                    file,
+                    name,
+                })
+            }
+        }
     }
 }
 
@@ -247,4 +316,12 @@ impl NewTag<'_> {
             Ok(dsl::tags.order(dsl::id.desc()).first::<Tag>(conn)?)
         })
     }
+}
+
+#[derive(Deserialize, Insertable)]
+#[table_name = "taggables"]
+pub struct NewTaggable<'a> {
+    pub tag_id: i32,
+    pub taggable_id: i32,
+    pub taggable_type: &'a str,
 }

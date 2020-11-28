@@ -694,7 +694,7 @@ impl Filesystem for ComicFS {
                             }
                         }
                     }
-                    InodeKind::Tag => {
+                    InodeKind::Tag if offset == 0 => {
                         let taggables =
                             Taggables::taggables(ino.id().try_into().unwrap(), &self.conn);
                         for (i, taggable) in taggables.iter().enumerate() {
@@ -729,6 +729,7 @@ impl Filesystem for ComicFS {
                             }
                         }
                     }
+                    InodeKind::Tag => (),
                     InodeKind::File | InodeKind::Special | InodeKind::Tagged => unreachable!(),
                 }
             }

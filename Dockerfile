@@ -65,6 +65,7 @@ RUN apt-get update \
     && apt-get install --no-install-recommends -y libfuse3-3 \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /storage/files
+ENV CELERY_BROKER_URL "redis://redis"
 COPY migrations  /migrations/
 COPY entrypoint.sh Cargo.toml ./
 COPY --from=build /target/release/comic-fs /usr/local/cargo/bin/diesel .flaskenv .env ./

@@ -1,13 +1,11 @@
 import abc
-import requests
+from dataclasses import asdict
 from pathlib import Path
-from dataclasses import dataclass
 
+import requests
 
-@dataclass
-class Task:
-    path: str
-    url: str
+from . import tasks
+from .data import Task
 
 
 class Downloader(metaclass=abc.ABCMeta):
@@ -24,3 +22,8 @@ class RequestDownloader(Downloader):
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "wb") as f:
             f.write(res.content)
+
+
+class BackgroundDownloader(Downloader):
+    def download(self, task: Task):
+        tasks.download.delay(asdict(task))
